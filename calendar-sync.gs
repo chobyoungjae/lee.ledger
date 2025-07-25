@@ -1,94 +1,220 @@
-/**************** CONFIG ****************/ // << 설정 섹션 시작
-const CFG = {
-  // << 전역 설정 객체 선언
-  CALENDAR_ID: '62feee307ee8a80b5ffa58a66f540833f146d3edee4bda3bd6da5326884d3a36@group.calendar.google.com', // << 대상 캘린더 ID
-  SHEETS: {
-    // << 시트 이름 매핑
-    SCHEDULE: '수업표',      // << 수업표 시트
-    STUDENT_DB: '학생정보DB'  // << 학생정보DB 시트
+/**
+ * ==================== 전역 설정 구성 ====================
+ * Google Apps Script 캘린더 동기화 시스템의 핵심 설정값들을 관리합니다.
+ * 이 설정을 통해 시트 구조, 캘린더 정보, 트리거 조건 등을 중앙에서 관리할 수 있습니다.
+ */
+const CALENDAR_SYNC_CONFIG = {
+  // 연동할 구글 캘린더의 고유 ID - 캘린더 설정에서 확인 가능
+  TARGET_CALENDAR_ID: '62feee307ee8a80b5ffa58a66f540833f146d3edee4bda3bd6da5326884d3a36@group.calendar.google.com',
+  
+  // 스프레드시트의 시트 이름들을 정의 - 시트 이름 변경 시 여기서만 수정하면 됨
+  SHEET_NAMES: {
+    SCHEDULE_SHEET: '수업표',        // 수업 일정이 입력되는 메인 시트
+    STUDENT_DATABASE: '학생정보DB'    // 학생 상세 정보가 저장된 데이터베이스 시트
   },
-  COL: {
-    // << 컬럼 인덱스 매핑
-    TRIGGER: 1,     // << A열: 캘린더이동 트리거
-    STUDENT_NAME: 2, // << B열: 학생 이름  
-    CONTENT: 3,     // << C열: 일정 내용 (사용 안함)
-    FREQUENCY: 4,   // << D열: 반복 주기 (매주 월요일 등)
-    TIME_DATA: 5,   // << E열: 시간 데이터
-    STATUS: 14,     // << N열: 전송 상태
-    UNIQUE_ID: 15   // << O열: 고유 ID
+  
+  // 수업표 시트의 컬럼 인덱스 정의 - 컬럼 순서 변경 시 여기서만 수정
+  SCHEDULE_COLUMNS: {
+    TRIGGER_COMMAND: 1,    // A열: '캘린더이동' 명령어 입력 컬럼
+    STUDENT_NAME: 2,       // B열: 학생 이름 (학생정보DB와 매칭되는 키값)
+    LESSON_CONTENT: 3,     // C열: 수업 내용 (현재 미사용)
+    REPEAT_FREQUENCY: 4,   // D열: 반복 주기 (예: '매주 월요일')
+    LESSON_TIME: 5,        // E열: 수업 시간 정보
+    SYNC_STATUS: 14,       // N열: 동기화 상태 ('전송완료' 또는 '전송실패')
+    EVENT_ID: 15          // O열: 생성된 이벤트의 고유 식별자
   },
-  STUDENT_DB_COL: {
-    // << 학생정보DB 시트 컬럼 매핑
-    NAME: 4,        // << D열: 학생 이름
-    F_DATA: 6,      // << F열: F 데이터
-    G_DATA: 7,      // << G열: G 데이터
-    M_DATA: 13,     // << M열: M 데이터
-    N_DATA: 14      // << N열: N 데이터
+  
+  // 학생정보DB 시트의 컬럼 인덱스 정의
+  STUDENT_DB_COLUMNS: {
+    STUDENT_NAME: 4,       // D열: 학생 이름 (수업표 시트와 매칭)
+    ADDITIONAL_INFO_F: 6,  // F열: 추가 정보 1 (캘린더 이벤트 설명에 포함)
+    ADDITIONAL_INFO_G: 7,  // G열: 추가 정보 2 (캘린더 이벤트 설명에 포함)
+    ADDITIONAL_INFO_M: 13, // M열: 추가 정보 3 (캘린더 이벤트 설명에 포함)
+    ADDITIONAL_INFO_N: 14  // N열: 추가 정보 4 (캘린더 이벤트 설명에 포함)
   },
-  TRIGGER_WORD: '캘린더이동', // << 트리거 키워드
-  TIME: {
-    // << 이벤트 시간 설정
-    START_HOUR: 9,  // << 시작 시간 (9시)
-    END_HOUR: 10    // << 종료 시간 (10시)
+  
+  // 동기화를 실행하는 트리거 명령어
+  SYNC_TRIGGER_WORD: '캘린더이동',
+  
+  // 기본 이벤트 시간 설정 (시간 데이터가 없을 경우 사용)
+  DEFAULT_EVENT_TIME: {
+    START_HOUR: 9,    // 기본 시작 시간: 오전 9시
+    END_HOUR: 10      // 기본 종료 시간: 오전 10시 (1시간 수업)
   }
-}; // << CFG 객체 끝
+};
 
-/******** 1. 시트 편집 감지 - Simple Trigger ********/ // << 편집 감지 함수 (권한 제한)
-function onEdit(e) {
-  // << Simple Trigger는 캘린더 API 접근 불가능하므로 로그만 기록
+/**
+ * ==================== 시트 편집 감지 함수 (Simple Trigger) ====================
+ * 스프레드시트에서 셀이 편집될 때 자동으로 실행되는 함수입니다.
+ * Simple Trigger는 권한이 제한되어 있어 캘린더 API 접근이 불가능하므로
+ * 편집 감지만 하고 실제 동기화는 Installable Trigger에서 처리합니다.
+ */
+function detectSheetEdit(editEvent) {
   try {
-    const sheet = e.source.getActiveSheet(); // << 편집된 시트
-    const range = e.range; // << 편집 범위
-    const value = e.value; // << 편집된 값
+    // 편집 이벤트에서 필요한 정보 추출
+    const editedSheet = editEvent.source.getActiveSheet();
+    const editedRange = editEvent.range;
+    const editedValue = editEvent.value;
+    const editedColumn = editedRange.getColumn();
+    const editedRow = editedRange.getRow();
     
-    // A열에 트리거 워드 입력 감지
-    if (range.getColumn() === CFG.COL.TRIGGER && value === CFG.TRIGGER_WORD) {
-      const row = range.getRow(); // << 편집된 행 번호
-      console.log(`[Simple Trigger] A${row}에 "${CFG.TRIGGER_WORD}" 감지됨 - 수동 트리거 필요`); // << 로그 기록
+    // A열에 캘린더 동기화 트리거 명령어가 입력되었는지 확인
+    const isTriggerColumn = editedColumn === CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.TRIGGER_COMMAND;
+    const isTriggerWord = editedValue === CALENDAR_SYNC_CONFIG.SYNC_TRIGGER_WORD;
+    
+    if (isTriggerColumn && isTriggerWord) {
+      console.log(`[편집 감지] ${editedRow}행에 "${CALENDAR_SYNC_CONFIG.SYNC_TRIGGER_WORD}" 입력 감지됨`);
+      console.log('[편집 감지] Installable Trigger에서 실제 캘린더 동기화가 실행됩니다.');
     }
+    
   } catch (error) {
-    console.error('[Simple Trigger] 편집 감지 중 오류:', error); // << 에러 로그
+    console.error('[편집 감지 오류] 시트 편집 감지 중 예외 발생:', error);
+    console.error('[편집 감지 오류] 오류 상세:', error.stack);
   }
 }
 
-/******** 2. 캘린더 동기화 실행 - Installable Trigger ********/ // << 실제 동기화 실행 함수
-function processCalendarSync(e) {
-  // << 수동 트리거 등록용 메인 함수 (모든 권한 사용 가능)
+// 기존 함수명과의 호환성을 위한 별칭
+const onEdit = detectSheetEdit;
+
+/**
+ * ==================== 캘린더 동기화 메인 실행 함수 (Installable Trigger) ====================
+ * Installable Trigger로 등록되어 실제 캘린더 API 권한을 가지고 동기화를 수행하는 함수입니다.
+ * 사용자가 A열에 '캘린더이동'을 입력하면 이 함수가 트리거되어 전체 동기화 프로세스를 실행합니다.
+ */
+function executeCalendarSynchronization(editEvent) {
   try {
-    const sheet = e.source.getActiveSheet(); // << 편집된 시트
-    const range = e.range; // << 편집 범위  
-    const value = e.value; // << 편집된 값
-    const sheetName = sheet.getName(); // << 시트 이름
+    // 편집 이벤트에서 상세 정보 추출
+    const editedSheet = editEvent.source.getActiveSheet();
+    const editedRange = editEvent.range;
+    const editedValue = editEvent.value;
+    const sheetName = editedSheet.getName();
+    const editedRow = editedRange.getRow();
+    const editedColumn = editedRange.getColumn();
     
-    console.log(`[Installable Trigger] 시트: ${sheetName}, 행: ${range.getRow()}, 열: ${range.getColumn()}, 값: ${value}`); // << 편집 정보 로그
+    // 동기화 실행 조건 로깅
+    console.log(`[동기화 트리거] 편집 상세 - 시트: ${sheetName}, 행: ${editedRow}, 열: ${editedColumn}, 값: "${editedValue}"`);
     
-    // 수업표 시트에서 A열 트리거 워드 확인
-    if (sheetName === CFG.SHEETS.SCHEDULE && 
-        range.getColumn() === CFG.COL.TRIGGER && 
-        value === CFG.TRIGGER_WORD) {
-      const row = range.getRow(); // << 편집된 행 번호
-      console.log(`[Installable Trigger] 캘린더 동기화 시작: ${row}행`); // << 시작 로그
+    // 동기화 실행 조건 검증
+    const isScheduleSheet = sheetName === CALENDAR_SYNC_CONFIG.SHEET_NAMES.SCHEDULE_SHEET;
+    const isTriggerColumn = editedColumn === CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.TRIGGER_COMMAND;
+    const isTriggerWord = editedValue === CALENDAR_SYNC_CONFIG.SYNC_TRIGGER_WORD;
+    
+    if (isScheduleSheet && isTriggerColumn && isTriggerWord) {
+      console.log(`[동기화 시작] ${editedRow}행에서 캘린더 동기화 프로세스를 시작합니다.`);
       
-      handleCalendarEvent(sheet, row); // << 캘린더 이벤트 처리 실행
+      // 실제 캘린더 이벤트 생성 및 동기화 실행
+      processScheduleRowToCalendarEvent(editedSheet, editedRow);
+      
     } else {
-      console.log(`[Installable Trigger] 조건 불일치 - 시트: ${sheetName}, 열: ${range.getColumn()}, 값: ${value}`); // << 조건 불일치 로그
+      // 조건에 맞지 않는 경우 상세 로깅 (디버깅용)
+      console.log(`[동기화 조건 불일치] 시트명: ${sheetName} (${isScheduleSheet ? '일치' : '불일치'}), ` +
+                  `컬럼: ${editedColumn} (${isTriggerColumn ? '일치' : '불일치'}), ` +
+                  `값: "${editedValue}" (${isTriggerWord ? '일치' : '불일치'})`);
     }
+    
   } catch (error) {
-    console.error('[Installable Trigger] 캘린더 동기화 실행 중 오류:', error); // << 에러 로그
+    console.error('[동기화 실행 오류] 캘린더 동기화 실행 중 예외 발생:', error);
+    console.error('[동기화 실행 오류] 오류 상세:', error.stack);
+    
+    // 사용자에게 오류 상황 알림 (가능한 경우)
+    if (editEvent && editEvent.source) {
+      try {
+        SpreadsheetApp.getUi().alert('캘린더 동기화 중 오류가 발생했습니다. 로그를 확인해주세요.');
+      } catch (uiError) {
+        console.error('[UI 알림 실패] 사용자 알림 표시 중 오류:', uiError);
+      }
+    }
   }
 }
 
-/******** 3. 캘린더 이벤트 처리 메인 로직 ********/ // << 캘린더 일정 생성 메인 함수
-function handleCalendarEvent(sheet, row) {
+// 기존 함수명과의 호환성을 위한 별칭
+const processCalendarSync = executeCalendarSynchronization;
+
+/**
+ * ==================== 수업표 행 데이터를 캘린더 이벤트로 변환 ====================
+ * 수업표 시트의 특정 행 데이터를 읽어서 구글 캘린더에 반복 일정으로 생성하는 핵심 함수입니다.
+ * 학생 정보, 수업 시간, 반복 주기를 분석하여 한 달간의 모든 해당 요일에 일정을 생성합니다.
+ * 
+ * @param {Sheet} scheduleSheet - 수업표 스프레드시트 객체
+ * @param {number} targetRow - 처리할 행 번호
+ */
+function processScheduleRowToCalendarEvent(scheduleSheet, targetRow) {
   try {
-    // 해당 행의 데이터 가져오기 (수업표 시트)
-    const rowData = sheet.getRange(row, 1, 1, 15).getValues()[0]; // << A~O열 데이터 읽기
+    console.log(`[일정 처리 시작] ${targetRow}행 데이터를 캘린더 이벤트로 변환을 시작합니다.`);
     
-    // 각 열 데이터 추출
-    const trigger = rowData[CFG.COL.TRIGGER - 1]; // << A열: 트리거 값
-    const studentName = rowData[CFG.COL.STUDENT_NAME - 1]; // << B열: 학생 이름
-    const frequency = rowData[CFG.COL.FREQUENCY - 1]; // << D열: 반복 주기
-    const timeData = rowData[CFG.COL.TIME_DATA - 1]; // << E열: 시간 데이터
+    // 수업표 행 데이터 읽기 및 파싱
+    const scheduleData = extractScheduleDataFromRow(scheduleSheet, targetRow);
+    if (!scheduleData.isValid) {
+      updateSyncResult(scheduleSheet, targetRow, '전송실패', scheduleData.errorMessage);
+      return;
+    }
+    
+    // 학생 정보 조회 및 검증
+    const studentInfo = findStudentInDatabase(scheduleData.studentName);
+    if (!studentInfo) {
+      updateSyncResult(scheduleSheet, targetRow, '전송실패', '학생 정보 없음');
+      console.error(`[학생 조회 실패] "${scheduleData.studentName}" 학생을 학생정보DB에서 찾을 수 없습니다.`);
+      return;
+    }
+    
+    // 반복 일정 날짜 계산
+    const targetDates = calculateRecurringDates(scheduleData.repeatFrequency);
+    if (targetDates.length === 0) {
+      updateSyncResult(scheduleSheet, targetRow, '전송실패', '날짜 계산 실패');
+      return;
+    }
+    
+    // 각 날짜별 캘린더 이벤트 생성
+    const eventCreationResults = createCalendarEventsForDates(
+      scheduleData.studentName,
+      studentInfo.eventDescription,
+      targetDates,
+      scheduleData.lessonTime
+    );
+    
+    // 결과 처리 및 상태 업데이트
+    const uniqueEventId = generateEventId();
+    if (eventCreationResults.successCount === targetDates.length) {
+      updateSyncResult(scheduleSheet, targetRow, '전송완료', uniqueEventId);
+      console.log(`[일정 생성 완료] 총 ${eventCreationResults.successCount}개 이벤트가 성공적으로 생성되었습니다.`);
+    } else {
+      updateSyncResult(scheduleSheet, targetRow, '전송실패', `${eventCreationResults.successCount}/${targetDates.length} 성공`);
+      console.error(`[일정 생성 부분실패] ${eventCreationResults.successCount}/${targetDates.length}개 이벤트만 생성되었습니다.`);
+    }
+    
+  } catch (error) {
+    console.error('[일정 처리 오류] 캘린더 이벤트 처리 중 예상치 못한 오류 발생:', error);
+    console.error('[일정 처리 오류] 오류 상세:', error.stack);
+    updateSyncResult(scheduleSheet, targetRow, '전송실패', '시스템 오류');
+  }
+}
+
+// 기존 함수명과의 호환성을 위한 별칭
+const handleCalendarEvent = processScheduleRowToCalendarEvent;
+
+/**
+ * ==================== 수업표 행 데이터 추출 및 검증 ====================
+ * 수업표의 특정 행에서 필요한 모든 데이터를 추출하고 유효성을 검증합니다.
+ * 
+ * @param {Sheet} sheet - 수업표 시트 객체
+ * @param {number} row - 데이터를 읽을 행 번호
+ * @returns {Object} 추출된 데이터와 유효성 검증 결과
+ */
+function extractScheduleDataFromRow(sheet, row) {
+  try {
+    // 해당 행의 모든 데이터 읽기 (A열부터 O열까지)
+    const rowData = sheet.getRange(row, 1, 1, 15).getValues()[0];
+    
+    // 각 컬럼별 데이터 추출
+    const extractedData = {
+      triggerCommand: rowData[CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.TRIGGER_COMMAND - 1],
+      studentName: rowData[CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.STUDENT_NAME - 1],
+      lessonContent: rowData[CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.LESSON_CONTENT - 1],
+      repeatFrequency: rowData[CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.REPEAT_FREQUENCY - 1],
+      lessonTime: rowData[CALENDAR_SYNC_CONFIG.SCHEDULE_COLUMNS.LESSON_TIME - 1]
+    };
+    
+    console.log(`[데이터 추출] 학생명: "${extractedData.studentName}", 주기: "${extractedData.repeatFrequency}", 시간: "${extractedData.lessonTime}"`);
     
     console.log(`[수업표 데이터] 트리거:"${trigger}", 학생명:"${studentName}", 주기:"${frequency}", 시간:"${timeData}"`); // << 데이터 로그
     
